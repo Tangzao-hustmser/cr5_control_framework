@@ -1,31 +1,31 @@
-import omni.isaac.motion_generation as mg
-from omni.isaac.core.articulations import Articulation
+import isaacsim.robot_motion.motion_generation as mg
+from isaacsim.core.prims import SingleArticulation
 import os
 
-# å°è¯•å¯¼å…¥RmpFlowç±»
+# ³¢ÊÔµ¼ÈëRmpFlowÀà
 try:
-    from omni.isaac.motion_generation.lula import RmpFlow
+    from isaacsim.robot_motion.motion_generation.lula import RmpFlow
 except ImportError:
     try:
         import lula
         RmpFlow = lula.motion_policies.RmpFlow
     except AttributeError:
-        # å¦‚æœä»¥ä¸Šéƒ½å¤±è´¥ï¼Œå°è¯•ä½¿ç”¨MotionPolicyInterfaceä½œä¸ºæ›¿ä»£
-        from omni.isaac.motion_generation import MotionPolicyInterface
+        # Èç¹ûÒÔÉÏ¶¼Ê§°Ü£¬³¢ÊÔÊ¹ÓÃMotionPolicyInterface×÷ÎªÌæ´ú
+        from isaacsim.robot_motion.motion_generation import MotionPolicyInterface
         RmpFlow = MotionPolicyInterface
 
 
 class RMPFlowController(mg.MotionPolicyController):
-    def __init__(self, name: str, robot_articulation: Articulation, physics_dt: float = 1.0 / 60.0) -> None:
-        # è·å–è„šæœ¬æ‰€åœ¨ç›®å½•
+    def __init__(self, name: str, robot_articulation: SingleArticulation, physics_dt: float = 1.0 / 60.0) -> None:
+        # »ñÈ¡½Å±¾ËùÔÚÄ¿Â¼
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
-        # ä½¿ç”¨æ­£ç¡®çš„è·¯å¾„
+        # Ê¹ÓÃÕıÈ·µÄÂ·¾¶
         robot_description_path = os.path.join(script_dir, "rmpflow", "robot_descriptor.yaml")
         rmpflow_config_path = os.path.join(script_dir, "rmpflow", "skyentific_rmpflow_common.yaml")
         urdf_path = os.path.join(script_dir, "..", "isaac_sim_models", "urdf", "cr5_robot.urdf")
         
-        # åˆå§‹åŒ–RMPFlow
+        # ³õÊ¼»¯RMPFlow
         self.rmpflow = RmpFlow(robot_description_path=robot_description_path,
                               rmpflow_config_path=rmpflow_config_path,
                               urdf_path=urdf_path,

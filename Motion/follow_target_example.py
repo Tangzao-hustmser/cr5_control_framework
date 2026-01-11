@@ -4,50 +4,114 @@ simulation_app = SimulationApp({"headless": False})
 import os
 import sys
 
-# »ñÈ¡½Å±¾ËùÔÚÄ¿Â¼²¢Ìí¼Óµ½PythonÂ·¾¶
+# è·å–è„šæœ¬æ‰€åœ¨ç›®å½•å¹¶æ·»åŠ åˆ°Pythonè·¯å¾„
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.append(script_dir)
 
-# È·±£¹¤×÷Ä¿Â¼ÊÇ½Å±¾ËùÔÚÄ¿Â¼
+# æ·»åŠ mytaskså’Œcontrollersç›®å½•åˆ°Pythonè·¯å¾„
+tasks_dir = os.path.join(script_dir, "mytasks")
+controllers_dir = os.path.join(script_dir, "controllers")
+if tasks_dir not in sys.path:
+    sys.path.append(tasks_dir)
+if controllers_dir not in sys.path:
+    sys.path.append(controllers_dir)
+
+# ç¡®ä¿å·¥ä½œç›®å½•æ˜¯è„šæœ¬æ‰€åœ¨ç›®å½•
 os.chdir(script_dir)
 
 from omni.isaac.core import World
-from tasks.follow_target import FollowTarget
+# ç›´æ¥å¯¼å…¥æ¨¡å—
+from mytasks.follow_target import FollowTarget
 import numpy as np
 from controllers.rmpflow import RMPFlowController
+import omni.graph.core as og
 
+
+# åˆ›å»ºä¸–ç•Œ
 my_world = World(stage_units_in_meters=1.0)
-#Initialize the Follow Target task with a target location for the cube to be followed by the end effector
-# ¿ÉÒÔÍ¨¹ırobot_positionºÍrobot_orientation²ÎÊıÉèÖÃ»úÆ÷ÈËµÄ³õÊ¼Î»ÖÃÆ«ÒÆ
-# ÀıÈç£¬½«»úÆ÷ÈËÔÚxÖá·½ÏòÆ«ÒÆ0.5Ã×
+
+# åˆå§‹åŒ–Follow Targetä»»åŠ¡
 my_task = FollowTarget(
     name="skyentific_follow_target", 
     target_position=np.array([0.5, 0, 1.0]),
-    robot_position=np.array([0, 0, 0.5])  # Ìí¼ÓÎ»ÖÃÆ«ÒÆ
+    robot_position=np.array([0, 0, 0.5])  # æ·»åŠ ä½ç½®åç§»
 )
 my_world.add_task(my_task)
 my_world.reset()
+
+# è·å–ä»»åŠ¡å‚æ•°
 task_params = my_world.get_task("skyentific_follow_target").get_params()
 target_name = task_params["target_name"]["value"]
 skyentific_name = task_params["robot_name"]["value"]
+
+# è·å–æœºå™¨äººå¯¹è±¡
 my_skyentific = my_world.scene.get_object(skyentific_name)
-#initialize the controller
+
+# åˆå§‹åŒ–æ§åˆ¶å™¨
 my_controller = RMPFlowController(name="target_follower_controller", robot_articulation=my_skyentific)
 my_controller.reset()
+
+# è·å–å…³èŠ‚æ§åˆ¶å™¨
 articulation_controller = my_skyentific.get_articulation_controller()
+
+# ç¼–è¾‘è¿åŠ¨å›¾
+
+keys = og.Controller.Keys
+(graph_handle, list_of_nodes, _, _) = og.Controller.edit(
+    {"graph_path": "/action_graph", "evaluator_name": "execution"},
+    {
+        keys.CREATE_NODES: [
+            ("W", "omni.graph.nodes.ReadKeyboardState"),
+            ("A", "omni.graph.nodes.ReadKeyboardState"),
+            ("S", "omni.graph.nodes.ReadKeyboardState"),
+            ("D", "omni.graph.nodes.ReadKeyboardState"),
+            ("ToDoubleW","omni.graph.nodes.ToDouble"),
+            ("ToDoubleA","omni.graph.nodes.ToDouble"),
+            ("ToDoubleS","omni.graph.nodes.ToDouble"),
+            ("ToDoubleD","omni.graph.nodes.ToDouble"),
+            ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+            ("DifferentialController", "isaacsim.robot.wheeled_robots.DifferentialController"),
+            ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
+            ("ArrayNames", "omni.graph.nodes.ConstructArray"),
+            ("NegateLinear", "omni.graph.nodes.Multiply"),
+            ("NegateAngular", "omni.graph.nodes.Multiply"),
+            ("AddLinear", "omni.graph.nodes.Add"),
+            ("AddAngular", "omni.graph.nodes.Add"),
+            ("SpeedLinear", "omni.graph.nodes.ConstantDouble"),
+            ("SpeedAngular", "omni.graph.nodes.ConstantDouble"),
+            ("NegOne", "omni.graph.nodes.ConstantInt"),
+        ],
+        keys.SET_VALUES: [
+              # setting the log level to warning so we can see the printout in terminal
+        ],
+        keys.CONNECT: [
+
+        ],
+    },
+)
+
+
 while simulation_app.is_running():
     my_world.step(render=True)
+    
     if my_world.is_playing():
         if my_world.current_time_step_index == 0:
             my_world.reset()
             my_controller.reset()
+        
+        # è·å–è§‚å¯Ÿæ•°æ®
         observations = my_world.get_observations()
+        
+        # è®¡ç®—å¹¶åº”ç”¨æœºå™¨äººæ‰‹è‡‚æ§åˆ¶åŠ¨ä½œ
         actions = my_controller.forward(
             target_end_effector_position=observations[target_name]["position"],
             target_end_effector_orientation=observations[target_name]["orientation"],
-            )
+        )
         articulation_controller.apply_action(actions)
-        # ´òÓ¡CR5»úÆ÷ÈËµÄ¹Ø½ÚÎ»ÖÃ£¨Ö»ÓĞ6¸ö¹Ø½Ú£¬Ë÷Òı0-5£©
-        print(observations["cr5_robot"]["joint_positions"]) # ´òÓ¡ËùÓĞ¹Ø½ÚÎ»ÖÃ
+        
+        # æ‰“å°CR5æœºå™¨äººçš„å…³èŠ‚ä½ç½®ï¼ˆåªæœ‰6ä¸ªå…³èŠ‚ï¼Œç´¢å¼•0-5ï¼‰
+        print(observations["cr5_robot"]["joint_positions"][:6])
+
+# å…³é—­åº”ç”¨ç¨‹åº
 simulation_app.close()

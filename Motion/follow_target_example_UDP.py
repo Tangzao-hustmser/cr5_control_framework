@@ -2,7 +2,7 @@ from isaacsim import SimulationApp
 
 simulation_app = SimulationApp({"headless": False})
 
-from omni.isaac.core import World
+from isaacsim.core.api import World
 from tasks.follow_target import FollowTarget
 import numpy as np
 import time

@@ -1,7 +1,7 @@
-from omni.isaac.manipulators import SingleManipulator
-from omni.isaac.manipulators.grippers import ParallelGripper
-from omni.isaac.core.utils.stage import add_reference_to_stage
-import omni.isaac.core.tasks as tasks
+from isaacsim.robot.manipulators import SingleManipulator
+from isaacsim.robot.manipulators.grippers import ParallelGripper
+from isaacsim.core.utils.stage import add_reference_to_stage
+import isaacsim.core.api.tasks as tasks
 from typing import Optional
 import numpy as np
 import os
@@ -34,14 +34,14 @@ class FollowTarget(tasks.FollowTarget):
         return
 
     def set_robot(self) -> SingleManipulator:
-        # Ê¹ÓÃCR5»úÆ÷ÈËµÄUSDÎÄ¼ş£¨´Óurdf×ª»»¶øÀ´£©
-        # »ñÈ¡µ±Ç°½Å±¾ËùÔÚÄ¿Â¼
+        # ä½¿ç”¨CR5æœºå™¨äººçš„USDæ–‡ä»¶ï¼ˆä»urdfè½¬æ¢è€Œæ¥ï¼‰
+        # è·å–å½“å‰è„šæœ¬æ‰€åœ¨ç›®å½•
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        # ¹¹½¨Ïà¶ÔÓÚµ±Ç°½Å±¾µÄUSDÎÄ¼şÂ·¾¶
+        # æ„å»ºç›¸å¯¹äºå½“å‰è„šæœ¬çš„USDæ–‡ä»¶è·¯å¾„
         asset_path = os.path.abspath(os.path.join(current_dir, "../../isaac_sim_models/urdf/ranger_mini_cr5_with_gripper/ranger_mini_cr5_with_gripper.usd"))
         add_reference_to_stage(usd_path=asset_path, prim_path="/World/cr5_robot")
         
-        # ÅäÖÃ¼Ğ×¦
+        # é…ç½®å¤¹çˆª
         gripper = ParallelGripper(
             end_effector_prim_path="/World/cr5_robot/dh_robotics_ag95_base_link",
             joint_prim_names=["finger_joint", "right_crank_joint"],
@@ -50,20 +50,30 @@ class FollowTarget(tasks.FollowTarget):
             action_deltas=np.array([0.6524, 0.6524]),
         )
         
-        # ¶¨Òå»úĞµ±Û
+        # å®šä¹‰æœºæ¢°è‡‚
         manipulator = SingleManipulator(
             prim_path="/World/cr5_robot", 
             name="cr5_robot",
             end_effector_prim_path="/World/cr5_robot/dh_robotics_ag95_base_link",
-            gripper=gripper
+            gripper=gripper,
+            position=self._robot_position,
+            orientation=self._robot_orientation
         )
         
-        # ÉèÖÃÄ¬ÈÏ¹Ø½ÚÎ»ÖÃ£¨22¸ö×ÔÓÉ¶È£©
+        # è®¾ç½®é»˜è®¤å…³èŠ‚ä½ç½®ï¼ˆ22ä¸ªè‡ªç”±åº¦ï¼‰
         joints_default_positions = np.zeros(22)
         manipulator.set_joints_default_state(positions=joints_default_positions)
         
-        # Ó¦ÓÃ»úÆ÷ÈËÎ»ÖÃÆ«ÒÆ
-        if self._robot_position is not None or self._robot_orientation is not None:
-            manipulator.set_world_pose(position=self._robot_position, orientation=self._robot_orientation)
-        
         return manipulator
+        
+    def _move_task_objects_to_their_frame(self):
+        """é‡å†™æ–¹æ³•ï¼Œç¡®ä¿åªå¯¹æœºå™¨äººæ ¹å…³èŠ‚åº”ç”¨å˜æ¢ï¼Œé¿å…éæ ¹å…³èŠ‚å˜æ¢è­¦å‘Š"""
+        for object_name, task_object in self._task_objects.items():
+            # åªå¯¹æœºå™¨äººæ ¹å…³èŠ‚åº”ç”¨å˜æ¢ï¼Œè·³è¿‡å…¶ä»–éƒ¨ä»¶
+            if hasattr(task_object, 'set_world_pose') and hasattr(task_object, 'get_world_pose'):
+                # æ£€æŸ¥æ˜¯å¦æ˜¯æœºå™¨äººæ ¹å…³èŠ‚
+                if hasattr(task_object, 'prim_path') and task_object.prim_path == "/World/cr5_robot":
+                    current_position, current_orientation = task_object.get_world_pose()
+                    task_object.set_world_pose(position=current_position + self._offset)
+                    task_object.set_default_state(position=current_position + self._offset)
+        return

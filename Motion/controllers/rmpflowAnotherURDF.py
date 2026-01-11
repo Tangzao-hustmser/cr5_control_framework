@@ -1,9 +1,10 @@
-import omni.isaac.motion_generation as mg
-from omni.isaac.core.articulations import Articulation
+import isaacsim.robot_motion.motion_generation as mg
+from isaacsim.core.prims import SingleArticulation
+
 
 
 class RMPFlowController(mg.MotionPolicyController):
-    def __init__(self, name: str, robot_articulation: Articulation, physics_dt: float = 1.0 / 60.0) -> None:
+    def __init__(self, name: str, robot_articulation: SingleArticulation, physics_dt: float = 1.0 / 60.0) -> None:
         # 获取当前脚本所在目录
         import os
         current_dir = os.path.dirname(os.path.abspath(__file__))
