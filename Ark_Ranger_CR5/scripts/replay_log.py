@@ -14,13 +14,17 @@ def main():
     parser.add_argument("--log-dir", required=True, help="Session log directory containing *.jsonl files")
     parser.add_argument("--headless", action="store_true", help="Replay in no-render mode")
     parser.add_argument("--speed", type=float, default=1.0, help="Replay speed multiplier")
+    parser.add_argument("--ros2-only", action="store_true", help="Replay ROS2-only pipeline logs")
     args = parser.parse_args()
 
     engine = ReplayEngine(args.log_dir)
     result = engine.replay(callback=None, headless=args.headless, speed=args.speed)
     print("Replay finished")
+    if args.ros2_only:
+        print("[Replay] ROS2-only path")
     print(result.to_dict())
 
 
 if __name__ == "__main__":
     main()
+

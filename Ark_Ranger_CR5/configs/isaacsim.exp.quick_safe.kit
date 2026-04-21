@@ -1,0 +1,46 @@
+[package]
+description = "Quick-safe experience without RTX hydra/material library for crash isolation."
+title = "Isaac Sim Quick Safe"
+version = "5.1.0"
+
+[dependencies]
+"isaacsim.simulation_app" = {}
+"isaacsim.core.api" = {}
+"isaacsim.core.utils" = {}
+"isaacsim.core.simulation_manager" = {}
+"isaacsim.storage.native" = {}
+"omni.isaac.core_archive" = {}
+"omni.isaac.ml_archive" = {}
+"omni.isaac.core" = {}
+"omni.isaac.kit" = {}
+"omni.isaac.motion_generation" = {}
+"omni.isaac.lula" = {}
+"omni.kit.loop-isaac" = {}
+"omni.kit.stage_templates" = {}
+"omni.kit.usd.layers" = {}
+"omni.physics.physx" = {}
+"omni.physics.stageupdate" = {}
+"omni.usd" = {}
+"omni.usd.core" = {}
+"omni.usd.schema.semantics" = {}
+"omni.warp.core" = {}
+"omni.pip.cloud" = {}
+"omni.pip.compute" = {}
+"omni.hydra.usdrt_delegate" = {}
+
+[settings.app]
+name = "Isaac-Sim Quick Safe"
+version = "5.1.0"
+settings.persistent = false
+window.title = "Isaac Sim Quick Safe"
+vulkan = true
+enableDeveloperWarnings = false
+
+[settings.app.exts.folders]
+'++' = [
+    "${app}",
+    "${app}/../exts",
+    "${app}/../extscache",
+    "${app}/../extsUser",
+    "${app}/../extsDeprecated",
+]

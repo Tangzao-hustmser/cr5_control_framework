@@ -1,311 +1,419 @@
-﻿# Ark Ranger CR5 仿真指南（新手可直接上手）
+# Ark Ranger CR5 仿真完整指南（Windows + WSL 已验证）
 
-## 1. 这份指南解决什么问题
+本文面向第一次接手 `Ark_Ranger_CR5` 的同学，目标是让你在不了解历史背景的情况下，也能独立完成：
 
-如果你第一次接触这个项目，按本文可以完成一整轮：
-启动仿真 -> 发送命令 -> 观察执行 -> 停止并拿到日志 -> 回放 -> 生成指标。
+1. 环境准备
+2. 启动仿真
+3. 发送命令
+4. 观测执行
+5. 停机与回放
+6. 生成 benchmark 报告
 
-## 2. 先理解“命令发在哪”
+项目长期目标是 **ROS2-only 主流程**。  
+当前仓库默认配置为 **Windows + WSL 友好模式**（`tcp_json` 兼容入口），用于规避 Windows 侧 `rclpy` 依赖问题。
 
-命令不是在另一个脚本里发，也不是改配置文件发。
-命令是发在运行 `run_simulation.py` 的那个终端里。
+> 本文流程按实际联调记录验证通过（2026-04-06）：  
+> `WSL bridge -> /r3/command -> Windows tcp_json listener -> Isaac 执行`
 
-当你看到下面这种提示时，说明可以发命令：
+---
 
-```text
-r3-json>
-```
+## 0. 本次联调总结（问题 -> 原因 -> 修复）
 
-你要做的是：在 `r3-json>` 后面输入一行命令（JSON 或关节角快捷命令），按回车。
+1. 启动报 `Startup blocked by health check`
+- 原因：预检失败（依赖或资产检查未通过）
+- 修复：查看 `reports/startup_health_report.json` 与 `reports/asset_consistency_report.json`，按报告修复后再启动
 
-## 3. 启动前准备（Windows）
+2. `ros2 action send_goal` 报 `The passed action type is invalid` 或 `UnsupportedTypeSupport`
+- 原因：`r3_msgs` 未正确 source / 动态库路径未加载
+- 修复：在 WSL 里 `source /opt/ros/humble/setup.bash`，并补齐 `AMENT_PREFIX_PATH`、`PYTHONPATH`、`LD_LIBRARY_PATH`
 
-建议开三个终端：
+3. `ModuleNotFoundError: rclpy._rclpy_pybind11`
+- 原因：落在 conda Python（例如 3.13），与 ROS2 Humble 的 Python 3.10 ABI 不匹配
+- 修复：`conda deactivate`，桥接脚本使用 `/usr/bin/python3`
 
-- 终端 A：运行 Registry
-- 终端 B：运行仿真并输入命令（`r3-json>`）
-- 终端 C：查看实时机械臂状态（可选，但推荐）
+4. `bash: windows-ip: No such file or directory`
+- 原因：把 `<windows-ip>` 占位符原样执行，`< >` 被 shell 当重定向
+- 修复：先求真实 IP 再传参，不要带尖括号
 
-### 3.1 终端 A：启动 Registry
+5. `bridge_sent` 但机器人不动
+- 结论：`bridge_sent` 只表示“桥已发到 TCP”，不表示 Isaac 已执行成功
+- 排查：看 Windows 侧 `reports/logs/<session_id>/commands.jsonl`、`validation.jsonl`、`safety.jsonl` 与 `events.jsonl`
+
+---
+
+## 1. 项目在做什么
+
+`Ark_Ranger_CR5` 是一个基于 Isaac Sim 的移动底盘 + 机械臂仿真项目，运行时采用 R3 管线：
+
+1. `协议校验`（validator）
+2. `安全过滤`（safety）
+3. `执行`（Isaac 控制）
+4. `日志与可观测性`（JSONL + ROS2 topics）
+
+命令主入口为 ROS2 Action：
+
+- `/r3/command` (`r3_msgs/action/Command`)
+
+系统控制与检查入口为 ROS2 Service：
+
+- `/r3/pause` `/r3/resume` `/r3/reset` `/r3/stop`
+- `/r3/health`
+- `/r3/asset_check`
+
+---
+
+## 2. 关键目录速览
+
+- `scripts/`：启动、回放、benchmark、验收脚本
+- `src/isaac_node.py`：主执行节点（R3 执行链）
+- `src/ros2/`：Action/Service/Topic 运行时组件
+- `configs/runtime_config.yaml`：运行模式和入口配置
+- `ros2_ws/src/r3_msgs/`：ROS2 消息定义
+- `reports/`：运行日志与报告输出
+
+---
+
+## 3. 运行模式（先搞清）
+
+### 3.1 当前默认模式（推荐直接用）
+
+`configs/runtime_config.yaml` 默认值：
+
+- `runtime.mode: compat`
+- `runtime.input_source: tcp_json`
+- `runtime.compat.enable_adapters: true`
+- `runtime.compat.enable_degraded_fallback: false`
+
+含义：
+
+- Windows 侧主入口是 TCP JSON（供 WSL ROS2 桥接）
+- 绕开 Windows 侧 `rclpy` 缺失导致的阻断
+- `status_output.destination: auto` 时，`tcp_json` 默认写状态到文件，不在主终端刷 step 日志
+
+### 3.2 目标模式（后续可切）
+
+若 Windows 侧 ROS2 依赖齐全，可切到：
+
+- `runtime.input_source: ros2_action`
+- `runtime.mode: ros2_only`（可选）
+
+---
+
+## 4. 环境准备（Windows + WSL Ubuntu 22.04）
+
+### 4.1 Windows（Isaac Sim）
 
 ```powershell
 cd E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\Ark_Ranger_CR5
-..\python.bat run_registry.py
+..\python.bat scripts\run_simulation.py
 ```
 
-保持这个终端不要关闭。
+跨端通信建议：
 
-### 3.2 终端 B：进入项目并可选跑门禁
+```powershell
+set ROS_DOMAIN_ID=0
+set ROS_LOCALHOST_ONLY=0
+```
+
+### 4.2 WSL（Ubuntu 22.04 + ROS2 Humble）
+
+```bash
+conda deactivate
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+```
+
+构建并 source `r3_msgs`：
+
+```bash
+cd /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/ros2_ws
+colcon build
+source install/setup.bash
+```
+
+如遇 `r3_msgs` 类型支持导入错误，补充：
+
+```bash
+export AMENT_PREFIX_PATH=/mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/ros2_ws/install/r3_msgs:$AMENT_PREFIX_PATH
+export PYTHONPATH=/mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/ros2_ws/install/r3_msgs/local/lib/python3.10/dist-packages:$PYTHONPATH
+export LD_LIBRARY_PATH=/mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/ros2_ws/install/r3_msgs/lib:/mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/ros2_ws/install/r3_msgs/local/lib/python3.10/dist-packages/r3_msgs:$LD_LIBRARY_PATH
+```
+
+快速自检：
+
+```bash
+/usr/bin/python3 -c "import rclpy; print('rclpy ok')"
+/usr/bin/python3 -c "from r3_msgs.action import Command; print('r3_msgs typesupport OK')"
+```
+
+---
+
+## 5. 第一次启动（标准流程）
+
+在 Windows 启动：
 
 ```powershell
 cd E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\Ark_Ranger_CR5
-python scripts/run_gates.py
+..\python.bat scripts\run_simulation.py
 ```
 
-### 3.3 终端 C（可选）：准备状态监视
+启动前会生成：
 
-先进入项目目录，后续会用到：
+- `reports/asset_consistency_report.json`
+- `reports/startup_health_report.json`
+
+状态解释：
+
+- `NORMAL`：正常启动
+- `DEGRADED`：降级启动（仅显式开启 `runtime.compat.enable_degraded_fallback: true` 时）
+- `BLOCKED`：阻断启动，先修复报告问题
+
+---
+
+## 6. 发送命令（ROS2 主入口）
+
+### 6.1 Action：发送运动命令
+
+在 WSL：
+
+```bash
+ros2 action send_goal /r3/command r3_msgs/action/Command "{command: {protocol_version: 'r3.v1', command_id: 'cmd-demo-001', timestamp_ms: 1710000000000, source: 'ros2_cli', command_type: 'pose', payload_json: '{\"frame\":\"world\",\"position_m\":[0.40,0.00,0.55],\"orientation_wxyz\":[1,0,0,0]}', metadata_json: '{}'}}" --feedback
+```
+
+可将 `command_type` 改为 `arm/gripper/system`，并同步修改 `payload_json`。
+
+注意：
+
+- 上面的 JSON 字符串必须作为 `ros2 action send_goal` 的参数整体传入
+- 不要单独执行 `{command: ...}`，否则会出现 `command not found`
+
+### 6.1.1 推荐：使用短命令脚本（避免手敲长 JSON）
+
+仓库已提供 `scripts/send_r3_goal.py`，建议优先使用：
+
+```bash
+/usr/bin/python3 /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/scripts/send_r3_goal.py pose --x 0.45 --y 0.15 --z 0.80 --feedback
+```
+
+更多示例：
+
+```bash
+/usr/bin/python3 /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/scripts/send_r3_goal.py arm --joints 0 -0.5 1.0 0 0.5 0 --feedback
+/usr/bin/python3 /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/scripts/send_r3_goal.py gripper --mode open
+/usr/bin/python3 /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/scripts/send_r3_goal.py system --operation stop --reason manual
+```
+
+如果你坚持用 `ros2 action send_goal` 原生命令，也可以写“最小字段版”：
+
+```bash
+ros2 action send_goal /r3/command r3_msgs/action/Command "{command: {command_type: 'pose', payload_json: '{\"frame\":\"world\",\"position_m\":[0.45,0.15,0.8],\"orientation_wxyz\":[1,0,0,0]}'}}" --feedback
+```
+
+### 6.2 Service：系统控制
+
+```bash
+ros2 service call /r3/pause r3_msgs/srv/SystemControl "{operation: 'pause', reason: 'manual'}"
+ros2 service call /r3/resume r3_msgs/srv/SystemControl "{operation: 'resume', reason: 'manual'}"
+ros2 service call /r3/reset r3_msgs/srv/SystemControl "{operation: 'reset', reason: 'manual'}"
+ros2 service call /r3/stop r3_msgs/srv/SystemControl "{operation: 'stop', reason: 'manual'}"
+```
+
+### 6.3 Service：运行时检查
+
+```bash
+ros2 service call /r3/health r3_msgs/srv/HealthCheck "{include_details: true, request_id: ''}"
+ros2 service call /r3/asset_check r3_msgs/srv/AssetCheck "{include_details: true, request_id: ''}"
+```
+
+---
+
+## 7. 观察系统状态
+
+### 7.1 ROS2 Topics（实时）
+
+```bash
+ros2 topic echo /r3/status
+ros2 topic echo /r3/events
+ros2 topic echo /r3/validation
+```
+
+### 7.2 JSONL（权威日志）
+
+每次仿真生成一个 session 目录：
+
+- `reports/logs/<session_id>/`
+
+关键文件：
+
+- `commands.jsonl`
+- `validation.jsonl`
+- `safety.jsonl`
+- `ik.jsonl`
+- `state.jsonl`
+- `events.jsonl`
+- `timeline_index.jsonl`
+
+### 7.3 分屏观察（推荐）
+
+主仿真终端保持清爽，在第二个 Windows 终端观察状态：
 
 ```powershell
-cd E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\Ark_Ranger_CR5
+..\python.bat scripts\watch_live_status.py --file reports\live_status\current_status.json
 ```
 
-## 4. 启动仿真
+---
 
-在终端 B 执行：
+## 8. 停机、回放、benchmark
+
+### 8.1 停机
+
+```bash
+ros2 service call /r3/stop r3_msgs/srv/SystemControl "{operation: 'stop', reason: 'manual'}"
+```
+
+### 8.2 回放
 
 ```powershell
-python scripts/run_simulation.py
+..\python.bat scripts\replay_log.py --log-dir reports\logs\<session_id> --headless --ros2-only
 ```
 
-如果出现 `ModuleNotFoundError: No module named 'isaacsim'`，改用 Isaac 根目录命令：
+### 8.3 benchmark
 
 ```powershell
-cd E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64
-.\python.bat Ark_Ranger_CR5\scripts\run_simulation.py
+..\python.bat scripts\run_benchmark.py --log-dir reports\logs\<session_id> --ros2-only
 ```
 
-启动后会自动做：
-- 资产一致性检查：`reports/asset_consistency_report.json`
-- 健康检查：`reports/startup_health_report.json`
-
-如果健康状态是 `BLOCKED`，系统会阻断启动。
-
-## 5. 怎么发一条命令（重点）
-
-### 5.1 发命令的动作
-
-1. 等待终端出现 `r3-json>`。
-2. 复制一条“单行命令”（JSON 或关节角快捷命令）。
-3. 粘贴到 `r3-json>` 后面。
-4. 按回车发送。
-
-### 5.2 一条 `pose` 命令示例（可直接粘贴）
-
-```json
-{"command_type":"pose","payload":{"frame":"world","position_m":[0.45,0.15,0.8],"orientation_wxyz":[1,0,0,0]}}
-```
-
-发送后命令会被执行。默认本地交互模式下，状态不会持续刷在 `r3-json>` 终端，避免影响你继续输入。
-
-如果你要实时看机械臂状态，请在终端 C 执行：
+### 8.4 ROS2-only E2E
 
 ```powershell
-python scripts/watch_live_status.py
+..\python.bat scripts\run_ros2_e2e.py --log-dir reports\logs\<session_id> --strict
 ```
 
-你会看到类似输出：
+---
 
-```text
-[LiveStatus][step=000360] cmd=cmd-xxxx EE xyz=(0.402, 0.001, 0.553) | arm=[...] | grip=0.0004
+## 9. WSL 桥接实操（已验证）
+
+适用场景：
+
+- Windows 侧无法直接稳定运行 `rclpy`
+- 需要在 WSL 使用 ROS2 CLI 控制 Windows 上的 Isaac
+
+步骤：
+
+1. Windows 启动仿真（监听 TCP，默认 `58000`）
+2. WSL 终端 A 启动桥接：
+
+```bash
+conda deactivate
+source /opt/ros/humble/setup.bash
+WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
+/usr/bin/python3 /mnt/e/isaccsim/isaac-sim-standalone-5.1.0-windows-x86_64/Ark_Ranger_CR5/scripts/run_ros2_tcp_bridge.py --host "$WIN_IP" --port 58000
 ```
 
-这说明命令已经进到执行链路，且状态在独立终端显示，不会打断 `r3-json>` 输入。
+3. WSL 终端 B 验证 Action 已注册：
 
-### 5.3 关节角输入控制
-
-你现在可以直接在 `r3-json>` 输入关节角来控制机械臂姿态：
-
-- 角度制（推荐，单位是度）：`arm`
-- 弧度制：`arm_rad`
-
-示例（6 轴机器人）：
-
-```text
-arm 0 -30 45 0 0 0
+```bash
+ros2 action list -t | grep /r3/command
 ```
 
-```text
-arm_rad 0 -0.52 0.79 0 0 0
-```
+4. WSL 终端 B 发送命令（见第 6 节）
 
-说明：
-- 输入顺序就是关节顺序 `j1 j2 j3 j4 j5 j6`。
-- `arm` 会自动把角度（deg）换算成弧度（rad）后执行。
-- 关节数量或范围不合法会被校验器拒绝并返回故障码。
+补充：
 
-## 6. 命令模板（你可以照着改参数）
+- 若 `ip route` 拿到的地址不可达，再尝试 `/etc/resolv.conf` 的 `nameserver`
+- 命令里不要写 `<windows-ip>` 这种占位符字面值
 
-### 6.1 常用简化模板（本地终端推荐）
+---
 
-`pose`：
+## 10. 兼容输入（仅临时）
 
-```json
-{"command_type":"pose","payload":{"frame":"world","position_m":[X,Y,Z],"orientation_wxyz":[W,X,Y,Z]}}
-```
-
-`arm`：
-
-```json
-{"command_type":"arm","payload":{"joint_positions_rad":[j1,j2,j3,j4,j5,j6]}}
-```
-
-`arm` 快捷输入（角度）：
-
-```text
-arm j1 j2 j3 j4 j5 j6
-```
-
-`arm_rad` 快捷输入（弧度）：
-
-```text
-arm_rad j1 j2 j3 j4 j5 j6
-```
-
-`gripper`：
-
-```json
-{"command_type":"gripper","payload":{"mode":"open"}}
-```
-
-`system`：
-
-```json
-{"command_type":"system","payload":{"operation":"pause"}}
-```
-
-### 6.2 完整协议模板（ROS2/外部总线推荐）
-
-```json
-{
-  "protocol_version": "r3.v1",
-  "command_id": "cmd-demo-001",
-  "timestamp_ms": 1710000000000,
-  "source": "local_terminal",
-  "command_type": "pose",
-  "payload": {
-    "frame": "world",
-    "position_m": [0.40, 0.00, 0.55],
-    "orientation_wxyz": [1, 0, 0, 0]
-  },
-  "metadata": {
-    "operator": "demo"
-  }
-}
-```
-
-## 7. 常用指令案例（可直接复制）
-
-### 7.1 到一个目标点（pose）
-
-```json
-{"command_type":"pose","payload":{"frame":"world","position_m":[0.45,0.10,0.55],"orientation_wxyz":[1,0,0,0]}}
-```
-
-### 7.2 关节角控制（arm）
-
-角度输入（推荐）：
-
-```text
-arm 0 -20 35 0 15 0
-```
-
-弧度输入：
-
-```text
-arm_rad 0 -0.35 0.61 0 0.26 0
-```
-
-JSON 输入（与快捷输入等价）：
-
-```json
-{"command_type":"arm","payload":{"joint_positions_rad":[0,-0.35,0.61,0,0.26,0]}}
-```
-
-### 7.3 夹爪开/合
-
-```json
-{"command_type":"gripper","payload":{"mode":"open"}}
-```
-
-```json
-{"command_type":"gripper","payload":{"mode":"close"}}
-```
-
-### 7.4 暂停/恢复/停止
-
-```json
-{"command_type":"system","payload":{"operation":"pause"}}
-```
-
-```json
-{"command_type":"system","payload":{"operation":"resume"}}
-```
-
-```json
-{"command_type":"system","payload":{"operation":"stop"}}
-```
-
-## 8. 如何结束本次仿真
-
-推荐发送停止命令：
-
-```json
-{"command_type":"system","payload":{"operation":"stop"}}
-```
-
-结束时终端会打印日志会话目录，例如：
-
-```text
-[Simulation] Log session: .../reports/logs/20260329T160057Z
-```
-
-记下这个 `<session_id>`，后续回放和指标都用它。
-
-## 9. 回放与指标（闭环后处理）
-
-### 9.1 回放
+若需要手工 JSON 输入，可用：
 
 ```powershell
-python scripts/replay_log.py --log-dir reports/logs/<session_id> --headless
+..\python.bat scripts\run_json_bridge.py
 ```
 
-关注输出字段：
-- `replayed_commands`
-- `dropped_commands`
-- `avg_state_delta`
-- `max_state_delta`
+它会把 `r3-json>` 转为 ROS2 Action/Service 请求。  
+该方式仅用于兼容迁移，不作为主流程。
 
-### 9.2 指标计算与基线对比
+---
+
+## 11. 常见问题与排查
+
+### 11.1 启动即 `BLOCKED`
+
+看：
+
+- `reports/startup_health_report.json`
+- `reports/asset_consistency_report.json`
+
+优先修复：
+
+- 配置缺字段
+- URDF/USD 路径错误
+- `rclpy` 或 `r3_msgs` 不可用
+
+### 11.2 `The passed action type is invalid`
+
+常见原因：
+
+- 没有 source 到包含 `r3_msgs` 的环境
+- `r3_msgs` 没成功构建
+
+先执行：
+
+```bash
+ros2 interface show r3_msgs/action/Command
+```
+
+### 11.3 `UnsupportedTypeSupport` 或 `libr3_msgs__rosidl_generator_py.so` 缺失
+
+处理：
+
+1. 确认已 `source install/setup.bash`
+2. 必要时补齐 `AMENT_PREFIX_PATH`、`PYTHONPATH`、`LD_LIBRARY_PATH`
+3. 用 `/usr/bin/python3 -c "from r3_msgs.action import Command"` 验证
+
+### 11.4 `rclpy._rclpy_pybind11` 缺失
+
+典型原因：conda Python 与 ROS2 ABI 不匹配。  
+处理：`conda deactivate`，并用 `/usr/bin/python3` 运行桥接。
+
+### 11.5 `bridge_sent` 但机器人不动
+
+这是桥接层成功，不代表 Isaac 执行成功。  
+进一步检查：
+
+1. Windows 仿真是否仍在运行
+2. `reports/logs/<session_id>/commands.jsonl` 是否有 `command.received`
+3. `validation.jsonl` 是否 `ok=false`
+4. `safety.jsonl` 是否 `block`
+5. `events.jsonl` 是否有故障码（如 `R3-E14xx`/`R3-E15xx`）
+
+### 11.6 快速链路自检
 
 ```powershell
-python scripts/run_benchmark.py --log-dir reports/logs/<session_id>
+..\python.bat scripts\run_gates.py --ros2-only
 ```
 
-默认输出：
-- `reports/benchmark_report.json`
+---
 
-你也可以按 session 单独输出：
+## 12. 新人 10 分钟演练清单
 
-```powershell
-python scripts/run_benchmark.py --log-dir reports/logs/<session_id> --output reports/benchmark_report_<session_id>.json
-```
+1. Windows 启动仿真
+2. WSL 终端 A 启动桥接
+3. WSL 终端 B 发送 `pose` Action
+4. `ros2 topic echo /r3/status` 观察状态
+5. 调用 `/r3/stop`
+6. 回放 `replay_log.py --ros2-only`
+7. 生成 `run_benchmark.py --ros2-only` 报告
+8. 运行 `run_ros2_e2e.py --strict` 生成验收报告
 
-## 10. 日志怎么查“命令之后发生了什么”
+---
 
-同一 session 目录下重点看：
-- `commands.jsonl`：收到了什么原始命令
-- `validation.jsonl`：校验是否通过，失败码是什么
-- `safety.jsonl`：是 pass / clamp / block
-- `ik.jsonl`：IK 成功还是失败
-- `state.jsonl`：执行后的状态
-- `events.jsonl`：异常/故障/系统事件
-- `timeline_index.jsonl`：统一时间轴索引
+## 13. 实机迁移入口
 
-## 11. 新手最容易踩的坑
+若要将该链路迁移到真实机器人，请继续阅读：
 
-1. 在 PowerShell 提示符（`PS ...>`）下发 JSON，而不是在 `r3-json>` 下发。
-2. JSON 不是单行，或者多了中文引号、尾逗号。
-3. `run_registry.py` 终端被关掉，导致通信异常。
-4. 用了系统 `python` 启动，没用 Isaac 的 `python.bat`。
-5. 期待状态行出现在 `r3-json>` 终端。现在默认是“输入终端和状态终端分离”，请用 `watch_live_status.py` 看实时状态。
-
-## 12. 最短可执行路径（3 分钟）
-
-1. 终端 A 启动 `run_registry.py`。
-2. 终端 B 启动 `run_simulation.py`。
-3. 终端 C 启动 `python scripts/watch_live_status.py`（可选）。
-4. 在 `r3-json>` 粘贴一条 `pose`。
-5. 再粘贴一条 `system.stop`。
-6. 用打印出的 session 跑 `replay_log.py`。
-7. 跑 `run_benchmark.py` 生成报告。
+- `docs/real_robot_migration_guide_zh.md`

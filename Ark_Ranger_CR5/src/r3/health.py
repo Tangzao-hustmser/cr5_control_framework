@@ -73,6 +73,9 @@ def run_startup_health_check(
 ) -> HealthReport:
     issues: List[HealthIssue] = []
 
+    rclpy_available = _module_available("rclpy")
+    r3_msgs_available = _module_available("r3_msgs")
+
     required_paths = [
         "robot.name",
         "robot.prim_path",
@@ -85,11 +88,38 @@ def run_startup_health_check(
         if not _has_config_keys(robot_cfg, path):
             issues.append(HealthIssue("R3-E1101", "error", "config", f"Missing config key: {path}"))
 
-    input_source = runtime_cfg.get("input_source", "local_terminal")
-    if input_source == "ros2":
-        if not _module_available("rclpy"):
-            issues.append(HealthIssue("R3-E1702", "error", "dependency", "ROS2 adapter selected but rclpy is unavailable."))
-    elif input_source != "local_terminal":
+    runtime_mode = str(runtime_cfg.get("mode", "")).strip().lower()
+    input_source = str(runtime_cfg.get("input_source", "ros2_action")).strip().lower()
+    compat_cfg = runtime_cfg.get("compat", {})
+    compat_enabled = bool(compat_cfg.get("enable_adapters", False))
+    degraded_fallback_enabled = bool(compat_cfg.get("enable_degraded_fallback", False))
+
+    if runtime_mode == "ros2_only" and input_source not in ("ros2", "ros2_action", "ros2_only"):
+        issues.append(
+            HealthIssue(
+                "R3-E1701",
+                "error",
+                "config",
+                "runtime.mode is ros2_only but input_source is not ROS2.",
+            )
+        )
+
+    if input_source in ("ros2", "ros2_action", "ros2_only"):
+        if not rclpy_available:
+            issues.append(HealthIssue("R3-E1702", "error", "dependency", "ROS2 input selected but rclpy is unavailable."))
+        if not r3_msgs_available:
+            issues.append(HealthIssue("R3-E1702", "error", "dependency", "ROS2 r3_msgs package is unavailable."))
+    elif input_source in ("local_terminal", "none", "disabled", "tcp_json"):
+        if input_source in ("local_terminal", "tcp_json") and not compat_enabled:
+            issues.append(
+                HealthIssue(
+                    "R3-E1701",
+                    "error",
+                    "adapter",
+                    f"Input source '{input_source}' requires runtime.compat.enable_adapters=true.",
+                )
+            )
+    else:
         issues.append(HealthIssue("R3-E1701", "error", "adapter", f"Unsupported input source: {input_source}"))
 
     require_lcm = bool(runtime_cfg.get("health", {}).get("require_lcm", False))
@@ -138,9 +168,18 @@ def run_startup_health_check(
         checked_at=checked_at,
         issues=issues,
         details={
+            "mode": runtime_mode,
             "input_source": input_source,
+            "compat": {
+                "enable_adapters": compat_enabled,
+                "enable_degraded_fallback": degraded_fallback_enabled,
+            },
             "require_lcm": require_lcm,
             "require_arktypes": require_arktypes,
+            "ros2": {
+                "rclpy": rclpy_available,
+                "r3_msgs": r3_msgs_available,
+            },
         },
     )
     return report

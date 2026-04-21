@@ -1,6 +1,29 @@
-﻿runtime:
-  protocol_version: "r3.v1"
-  input_source: "local_terminal"
+runtime:
+  mode: "compat"
+  input_source: "tcp_json"
+
+  compat:
+    enable_ark_patch: false
+    enable_ark_subscription: false
+    enable_adapters: true
+    enable_ark_lcm: false
+    enable_degraded_fallback: false
+    degraded_input_source: "tcp_json"
+
+  ros2:
+    enabled: true
+    force_enable: false
+    node_name: "ark_ranger_r3"
+    action_name: "/r3/command"
+    qos_depth: 10
+    status_interval_s: 0.1
+    topics:
+      events: "/r3/events"
+      status: "/r3/status"
+      validation: "/r3/validation"
+    action:
+      result_timeout_s: 3.0
+      complete_on_accept: false
 
   adapters:
     local_terminal:
@@ -9,6 +32,11 @@
     ros2:
       topic: "/robot/action"
       node_name: "ark_ranger_r3_adapter"
+    tcp_json:
+      host: "0.0.0.0"
+      port: 58000
+      max_line_bytes: 1048576
+      accept_timeout_s: 0.5
 
   health:
     require_lcm: false

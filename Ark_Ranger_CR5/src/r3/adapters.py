@@ -1,10 +1,11 @@
 ﻿"""Input adapter abstraction for command ingestion."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import math
 import queue
+import socketserver
 import threading
 import time
 
@@ -32,6 +33,73 @@ class InputAdapter:
 
     def health(self) -> Dict[str, Any]:
         return {"name": self.name, "ready": True}
+
+
+def _parse_arm_shortcut(line: str) -> Optional[Dict[str, Any]]:
+    text = str(line).strip()
+    lower = text.lower()
+
+    if lower == "arm_rad":
+        values_text = ""
+        unit = "rad"
+    elif lower.startswith("arm_rad "):
+        values_text = text[len("arm_rad ") :].strip()
+        unit = "rad"
+    elif lower == "arm":
+        values_text = ""
+        unit = "deg"
+    elif lower.startswith("arm "):
+        values_text = text[len("arm ") :].strip()
+        unit = "deg"
+    else:
+        return None
+
+    if not values_text:
+        raise ValueError("missing joint angle values")
+
+    normalized = values_text.replace(",", " ")
+    tokens = [tok for tok in normalized.split() if tok]
+    try:
+        values = [float(tok) for tok in tokens]
+    except ValueError:
+        raise ValueError("joint angle values must be numeric")
+
+    if unit == "deg":
+        values = [math.radians(v) for v in values]
+
+    return {
+        "command_type": "arm",
+        "payload": {
+            "joint_positions_rad": values,
+        },
+        "metadata": {
+            "terminal_shortcut": f"arm_{unit}",
+        },
+    }
+
+
+def _parse_line_payload(raw_line: str) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    spec = get_fault_spec("R3-E1001")
+    try:
+        shortcut = _parse_arm_shortcut(raw_line)
+    except ValueError as exc:
+        return None, {
+            "fault_code": spec.code,
+            "message": f"{spec.message} detail=arm shortcut parse failed: {str(exc)}",
+            "raw_line": raw_line,
+        }
+
+    if shortcut is not None:
+        return shortcut, None
+
+    try:
+        return json.loads(raw_line), None
+    except json.JSONDecodeError as exc:
+        return None, {
+            "fault_code": spec.code,
+            "message": f"{spec.message} detail={str(exc)}",
+            "raw_line": raw_line,
+        }
 
 
 class LocalInputAdapter(InputAdapter):
@@ -77,46 +145,7 @@ class LocalInputAdapter(InputAdapter):
             self._queue.put(AdapterMessage(source=self.name, raw=line, received_ms=int(time.time() * 1000)))
 
     def _parse_arm_shortcut(self, line: str) -> Optional[Dict[str, Any]]:
-        text = str(line).strip()
-        lower = text.lower()
-
-        if lower == "arm_rad":
-            values_text = ""
-            unit = "rad"
-        elif lower.startswith("arm_rad "):
-            values_text = text[len("arm_rad "):].strip()
-            unit = "rad"
-        elif lower == "arm":
-            values_text = ""
-            unit = "deg"
-        elif lower.startswith("arm "):
-            values_text = text[len("arm "):].strip()
-            unit = "deg"
-        else:
-            return None
-
-        if not values_text:
-            raise ValueError("missing joint angle values")
-
-        normalized = values_text.replace(",", " ")
-        tokens = [tok for tok in normalized.split() if tok]
-        try:
-            values = [float(tok) for tok in tokens]
-        except ValueError:
-            raise ValueError("joint angle values must be numeric")
-
-        if unit == "deg":
-            values = [math.radians(v) for v in values]
-
-        return {
-            "command_type": "arm",
-            "payload": {
-                "joint_positions_rad": values,
-            },
-            "metadata": {
-                "terminal_shortcut": f"arm_{unit}",
-            },
-        }
+        return _parse_arm_shortcut(line)
 
     def poll(self) -> List[AdapterMessage]:
         out: List[AdapterMessage] = []
@@ -127,47 +156,18 @@ class LocalInputAdapter(InputAdapter):
                 break
             if isinstance(item.raw, str):
                 raw_line = item.raw.strip()
-                try:
-                    shortcut = self._parse_arm_shortcut(raw_line)
-                except ValueError as exc:
-                    spec = get_fault_spec("R3-E1001")
+                parsed, error = _parse_line_payload(raw_line)
+                if error is not None:
                     out.append(
                         AdapterMessage(
                             source=item.source,
-                            raw={
-                                "__adapter_error__": {
-                                    "fault_code": spec.code,
-                                    "message": f"{spec.message} detail=arm shortcut parse failed: {str(exc)}",
-                                    "raw_line": item.raw,
-                                }
-                            },
+                            raw={"__adapter_error__": error},
                             received_ms=item.received_ms,
                         )
                     )
                     continue
-
-                if shortcut is not None:
-                    out.append(AdapterMessage(source=item.source, raw=shortcut, received_ms=item.received_ms))
-                    continue
-
-                try:
-                    raw = json.loads(item.raw)
-                    out.append(AdapterMessage(source=item.source, raw=raw, received_ms=item.received_ms))
-                except json.JSONDecodeError as exc:
-                    spec = get_fault_spec("R3-E1001")
-                    out.append(
-                        AdapterMessage(
-                            source=item.source,
-                            raw={
-                                "__adapter_error__": {
-                                    "fault_code": spec.code,
-                                    "message": f"{spec.message} detail={str(exc)}",
-                                    "raw_line": item.raw,
-                                }
-                            },
-                            received_ms=item.received_ms,
-                        )
-                    )
+                if parsed is not None:
+                    out.append(AdapterMessage(source=item.source, raw=parsed, received_ms=item.received_ms))
             else:
                 out.append(item)
         return out
@@ -262,8 +262,15 @@ class Ros2InputAdapter(InputAdapter):
 
 def build_adapters(runtime_cfg: Dict[str, Any]) -> List[InputAdapter]:
     adapters: List[InputAdapter] = []
-    selected = runtime_cfg.get("input_source", "local_terminal")
+    compat_enabled = bool(runtime_cfg.get("compat", {}).get("enable_adapters", False))
+    if not compat_enabled:
+        return adapters
+
+    selected = str(runtime_cfg.get("input_source", "ros2_action")).strip().lower()
     adapters_cfg = runtime_cfg.get("adapters", {})
+
+    if selected in ("ros2_action", "ros2_only", "none", "disabled"):
+        return adapters
 
     if selected == "local_terminal":
         cfg = adapters_cfg.get("local_terminal", {})
@@ -281,7 +288,148 @@ def build_adapters(runtime_cfg: Dict[str, Any]) -> List[InputAdapter]:
                 node_name=str(cfg.get("node_name", "ark_ranger_r3_adapter")),
             )
         )
+    elif selected == "tcp_json":
+        cfg = adapters_cfg.get("tcp_json", {})
+        adapters.append(
+            TcpJsonInputAdapter(
+                host=str(cfg.get("host", "0.0.0.0")),
+                port=int(cfg.get("port", 58000)),
+                max_line_bytes=int(cfg.get("max_line_bytes", 1024 * 1024)),
+                accept_timeout_s=float(cfg.get("accept_timeout_s", 0.5)),
+            )
+        )
     else:
         raise RuntimeError(f"Unknown input_source: {selected}")
 
     return adapters
+
+
+class _TcpJsonServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class _TcpJsonHandler(socketserver.StreamRequestHandler):
+    def handle(self) -> None:
+        adapter: "TcpJsonInputAdapter" = getattr(self.server, "adapter")
+        while adapter._running:
+            try:
+                line = self.rfile.readline(adapter.max_line_bytes + 1)
+            except Exception:
+                break
+            if not line:
+                break
+            if len(line) > adapter.max_line_bytes:
+                adapter._enqueue_adapter_error(
+                    "R3-E1001",
+                    f"line too long (> {adapter.max_line_bytes} bytes)",
+                    raw_line=line[:200].decode("utf-8", errors="replace"),
+                )
+                if not line.endswith(b"\n"):
+                    while True:
+                        tail = self.rfile.readline()
+                        if not tail or tail.endswith(b"\n"):
+                            break
+                continue
+
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text:
+                continue
+            adapter._enqueue_text(text)
+
+
+class TcpJsonInputAdapter(InputAdapter):
+    """Read unified JSON commands from TCP line-delimited stream."""
+
+    name = "tcp_json"
+
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 58000,
+        max_line_bytes: int = 1024 * 1024,
+        accept_timeout_s: float = 0.5,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.max_line_bytes = max_line_bytes
+        self.accept_timeout_s = accept_timeout_s
+        self._queue: "queue.Queue[AdapterMessage]" = queue.Queue()
+        self._running = False
+        self._server: Optional[_TcpJsonServer] = None
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._server = _TcpJsonServer((self.host, self.port), _TcpJsonHandler)
+        self._server.adapter = self
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            kwargs={"poll_interval": self.accept_timeout_s},
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _enqueue_text(self, raw_line: str) -> None:
+        parsed, error = _parse_line_payload(raw_line)
+        if error is not None:
+            self._queue.put(
+                AdapterMessage(
+                    source=self.name,
+                    raw={"__adapter_error__": error},
+                    received_ms=int(time.time() * 1000),
+                )
+            )
+            return
+        if parsed is not None:
+            self._queue.put(
+                AdapterMessage(
+                    source=self.name,
+                    raw=parsed,
+                    received_ms=int(time.time() * 1000),
+                )
+            )
+
+    def _enqueue_adapter_error(self, fault_code: str, message: str, raw_line: str) -> None:
+        self._queue.put(
+            AdapterMessage(
+                source=self.name,
+                raw={
+                    "__adapter_error__": {
+                        "fault_code": fault_code,
+                        "message": message,
+                        "raw_line": raw_line,
+                    }
+                },
+                received_ms=int(time.time() * 1000),
+            )
+        )
+
+    def poll(self) -> List[AdapterMessage]:
+        out: List[AdapterMessage] = []
+        while True:
+            try:
+                out.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        return out
+
+    def stop(self) -> None:
+        self._running = False
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+                self._server.server_close()
+            except Exception:
+                pass
+            self._server = None
+
+    def health(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "ready": bool(self._running),
+            "host": self.host,
+            "port": self.port,
+        }

@@ -1,8 +1,10 @@
-﻿import os
+import os
 import sys
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import json
+import threading
 
 import numpy as np
 import yaml
@@ -13,13 +15,52 @@ if root not in sys.path:
 
 from ark_patch import Node
 from .bridge.ark_bridge import ArkIsaacBridge
-from .r3.adapters import AdapterMessage, InputAdapter
+from .r3.adapters import InputAdapter
 from .r3.events import EVENT_TYPES, EventPublisher
 from .r3.protocol import NormalizedCommand, generate_command_id
-from .r3.safety import RobotStateSnapshot, SafetyFilterV1
+from .r3.safety import RobotStateSnapshot, SafetyFilterV1, SafetyDecision
 from .r3.structured_logging import StructuredLogger
 from .r3.timeline import TimelineIndexer
 from .r3.validator import RuntimeModel, runtime_model_from_config, validate_and_normalize
+
+
+
+@dataclass
+class CommandHandleResult:
+    command_id: str
+    accepted: bool
+    success: bool
+    fault_code: str = ""
+    message: str = ""
+    validation_issues: List[Any] = field(default_factory=list)
+    safety: Optional[SafetyDecision] = None
+    normalized: Optional[NormalizedCommand] = None
+    stage: str = "processed"
+    status: Optional[Dict[str, Any]] = None
+
+    def to_result_dict(self) -> Dict[str, Any]:
+        normalized_json = ""
+        if self.normalized is not None:
+            normalized_json = json.dumps(self.normalized.to_dict(), ensure_ascii=False)
+        safety_payload = None
+        if self.safety is not None:
+            safety_payload = {
+                "decision": self.safety.decision,
+                "reason_codes": list(self.safety.reason_codes),
+                "details": dict(self.safety.details),
+            }
+        return {
+            "command_id": self.command_id,
+            "accepted": bool(self.accepted),
+            "success": bool(self.success),
+            "fault_code": self.fault_code or "",
+            "message": self.message or "",
+            "validation_issues": self.validation_issues,
+            "safety": safety_payload,
+            "normalized_json": normalized_json,
+            "stage": self.stage,
+            "status": self.status,
+        }
 
 
 class ArkIsaacSimNode(Node):
@@ -29,15 +70,28 @@ class ArkIsaacSimNode(Node):
         config_path: str,
         runtime_cfg_path: str,
         adapters: Optional[List[InputAdapter]] = None,
+        ros2_publisher: Optional[Any] = None,
+        runtime_cfg_override: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__("isaac_bridge_node")
         self.world = world
 
         with open(config_path, "r", encoding="utf-8-sig") as fh:
             self.robot_cfg = yaml.safe_load(fh)
-        with open(runtime_cfg_path, "r", encoding="utf-8-sig") as fh:
-            runtime_root = yaml.safe_load(fh)
-        self.runtime_cfg = runtime_root.get("runtime", {})
+        if runtime_cfg_override is not None:
+            self.runtime_cfg = runtime_cfg_override
+        else:
+            with open(runtime_cfg_path, "r", encoding="utf-8-sig") as fh:
+                runtime_root = yaml.safe_load(fh)
+            self.runtime_cfg = runtime_root.get("runtime", {})
+        self.input_source = str(self.runtime_cfg.get("input_source", "ros2_action")).strip().lower()
+        self.ros2_publisher = ros2_publisher
+        self.config_path = config_path
+        self.runtime_cfg_path = runtime_cfg_path
+        self.project_root = root
+        self._command_lock = threading.Lock()
+        self._event_lock = threading.Lock()
+        self._action_feedback_cb = None
 
         self.bridge = ArkIsaacBridge(config_path, self.world, runtime_cfg=self.runtime_cfg)
         self.runtime_model: RuntimeModel = runtime_model_from_config(self.robot_cfg)
@@ -57,11 +111,15 @@ class ArkIsaacSimNode(Node):
         self.events = EventPublisher()
         self.events.subscribe(self._on_event)
 
-        self.adapters: List[InputAdapter] = adapters or []
-        self.pending_messages: List[AdapterMessage] = []
+        self.compat_adapters: List[InputAdapter] = adapters or []
 
         self.active_command: Optional[NormalizedCommand] = None
         self.last_observation = None
+        self.last_status_snapshot: Optional[Dict[str, Any]] = None
+        self._last_ik_info: Dict[str, Any] = {}
+        self._last_gripper_info: Dict[str, Any] = {}
+        self._last_safety_decision: Optional[SafetyDecision] = None
+        self._event_seq = 0
 
         self.paused = False
         self.shutdown_requested = False
@@ -92,8 +150,14 @@ class ArkIsaacSimNode(Node):
         self.status_output_destination = self._resolve_status_destination(self.status_output_destination_cfg)
         self._next_status_print_ts = 0.0
 
-        # Keep existing subscription entry but enforce unified protocol.
-        self.create_subscription(dict, "/robot/action", self._on_action_cb)
+        if bool(self.runtime_cfg.get("compat", {}).get("enable_ark_subscription", False)):
+            self.create_subscription(dict, "/robot/action", self._on_action_cb)
+
+    def attach_ros2_publishers(self, publishers: Any) -> None:
+        self.ros2_publisher = publishers
+
+    def set_action_feedback_callback(self, callback: Optional[Any]) -> None:
+        self._action_feedback_cb = callback
 
     @staticmethod
     def _safe_float(value: Any, default: float, min_value: Optional[float] = None) -> float:
@@ -128,8 +192,9 @@ class ArkIsaacSimNode(Node):
         mode = configured if configured in valid_modes else "auto"
         if mode != "auto":
             return mode
-        has_local_terminal = any(getattr(adapter, "name", "") == "local_terminal" for adapter in self.adapters)
-        return "file" if has_local_terminal else "console"
+        if self.input_source in ("local_terminal", "tcp_json"):
+            return "file"
+        return "console"
 
     def _status_to_console(self) -> bool:
         return self.status_output_destination in ("console", "both")
@@ -165,30 +230,45 @@ class ArkIsaacSimNode(Node):
 
     def initialize_physics(self) -> None:
         self.bridge.initialize_physics()
-        for adapter in self.adapters:
+        for adapter in self.compat_adapters:
             adapter.start()
 
     def shutdown(self) -> None:
-        for adapter in self.adapters:
+        for adapter in self.compat_adapters:
             try:
                 adapter.stop()
             except Exception:
                 pass
 
     def _on_event(self, event: Any) -> None:
-        self.logger.log_event(event.command_id, event.to_dict())
-        event_id = f"evt-{event.timestamp_ms}-{event.command_id}"
-        self.timeline.link_event(event_id, event.timestamp_ms, event.command_id, event.fault_code)
+        event_id = self._next_event_id(event.timestamp_ms, event.command_id)
+        timeline_mapping = self.timeline.link_event(event_id, event.timestamp_ms, event.command_id, event.fault_code)
+        event_payload = event.to_dict()
+        event_payload["event_id"] = event_id
+        event_payload["timeline"] = timeline_mapping
+        self.logger.log_event(event.command_id, event_payload)
+        if self.ros2_publisher is not None:
+            try:
+                self.ros2_publisher.publish_event(event, event_id=event_id, timeline_mapping=timeline_mapping)
+            except Exception:
+                pass
+
+    def _next_event_id(self, timestamp_ms: int, command_id: str) -> str:
+        with self._event_lock:
+            self._event_seq += 1
+            seq = self._event_seq
+        return f"evt-{int(timestamp_ms)}-{seq:06d}-{command_id}"
 
     def _state_for_safety(self) -> RobotStateSnapshot:
-        if self.last_observation is None:
+        with self._command_lock:
+            obs = self.last_observation
+        if obs is None:
             return RobotStateSnapshot(
                 joint_positions_rad=[0.0] * self.runtime_model.arm_joint_count,
                 ee_pose_wxyz=[0.0] * 7,
                 gripper_position_rad=0.0,
             )
 
-        obs = self.last_observation
         arm_joint_values = []
         for idx in self.bridge.arm_indices:
             if idx < len(obs.joint_positions):
@@ -203,14 +283,13 @@ class ArkIsaacSimNode(Node):
         )
 
     def _on_action_cb(self, msg: Dict[str, Any]) -> None:
-        self.pending_messages.append(
-            AdapterMessage(source="ark_subscription", raw=msg, received_ms=int(time.time() * 1000))
-        )
+        self._process_raw(msg, source="ark_subscription")
 
-    def _poll_adapters(self) -> None:
-        for adapter in self.adapters:
+    def _drain_compat_adapters(self) -> None:
+        for adapter in self.compat_adapters:
             try:
-                self.pending_messages.extend(adapter.poll())
+                for message in adapter.poll():
+                    self._process_raw(message.raw, message.source)
             except Exception as exc:
                 self.events.publish(
                     EVENT_TYPES["COMMAND_REJECTED"],
@@ -240,15 +319,16 @@ class ArkIsaacSimNode(Node):
 
     def _handle_system_command(self, command: NormalizedCommand) -> None:
         op = command.system_operation
-        if op == "pause":
-            self.paused = True
-        elif op == "resume":
-            self.paused = False
-        elif op == "reset":
-            self.paused = False
-            self.active_command = self._default_hold_command()
-        elif op == "stop":
-            self.shutdown_requested = True
+        with self._command_lock:
+            if op == "pause":
+                self.paused = True
+            elif op == "resume":
+                self.paused = False
+            elif op == "reset":
+                self.paused = False
+                self.active_command = self._default_hold_command()
+            elif op == "stop":
+                self.shutdown_requested = True
 
         self.events.publish(
             EVENT_TYPES["SYSTEM_STATE_CHANGE"],
@@ -258,29 +338,71 @@ class ArkIsaacSimNode(Node):
             details={"paused": self.paused, "shutdown_requested": self.shutdown_requested},
         )
 
-    def _process_message(self, message: AdapterMessage) -> None:
-        raw = message.raw
+
+    def _publish_validation(self, result: CommandHandleResult) -> None:
+        if self.ros2_publisher is None:
+            return
+        try:
+            normalized_dict = result.normalized.to_dict() if result.normalized else None
+            self.ros2_publisher.publish_validation(
+                result.command_id,
+                bool(result.accepted and result.success),
+                result.validation_issues,
+                normalized_dict,
+            )
+        except Exception:
+            pass
+
+    def handle_command(self, raw: Any, source: Optional[str] = None) -> CommandHandleResult:
+        src = source
+        if not src:
+            if isinstance(raw, dict):
+                src = str(raw.get("source", "ros2_action"))
+            else:
+                src = "ros2_action"
+        return self._process_raw(raw, src)
+
+    def handle_system_operation(self, operation: str, reason: str = "", source: str = "ros2_service") -> CommandHandleResult:
+        payload: Dict[str, Any] = {"operation": operation}
+        if reason:
+            payload["reason"] = reason
+        raw = {"command_type": "system", "payload": payload}
+        return self.handle_command(raw, source=source)
+
+    def _process_raw(self, raw: Any, source: str) -> CommandHandleResult:
         if isinstance(raw, dict) and "__adapter_error__" in raw:
             err = raw["__adapter_error__"]
             cmd_id = generate_command_id()
-            self.logger.log_command(cmd_id, message.source, raw)
+            self.logger.log_command(cmd_id, source, raw)
             self.logger.log_validation(cmd_id, False, [err], None)
             self.events.publish(
                 EVENT_TYPES["COMMAND_REJECTED"],
                 command_id=cmd_id,
                 fault_code=err.get("fault_code", "R3-E1001"),
                 reason="adapter_parse_error",
-                details={"source": message.source, "raw": err.get("raw_line", "")},
+                details={"source": source, "raw": err.get("raw_line", "")},
             )
-            return
+            self._last_safety_decision = None
+            result = CommandHandleResult(
+                command_id=cmd_id,
+                accepted=False,
+                success=False,
+                fault_code=err.get("fault_code", "R3-E1001"),
+                message="adapter_parse_error",
+                validation_issues=[err],
+                stage="rejected",
+                status=self.last_status_snapshot,
+            )
+            self._publish_validation(result)
+            return result
 
         provisional_command_id = raw.get("command_id", generate_command_id()) if isinstance(raw, dict) else generate_command_id()
         normalized_raw = dict(raw) if isinstance(raw, dict) else raw
         if isinstance(normalized_raw, dict):
             normalized_raw.setdefault("command_id", provisional_command_id)
 
-        self.logger.log_command(provisional_command_id, message.source, normalized_raw)
-        validation = validate_and_normalize(normalized_raw, runtime=self.runtime_model, source=message.source)
+        self.logger.log_command(provisional_command_id, source, normalized_raw)
+        validation = validate_and_normalize(normalized_raw, runtime=self.runtime_model, source=source)
 
         command_id = provisional_command_id
         if validation.command is not None:
@@ -299,7 +421,19 @@ class ArkIsaacSimNode(Node):
                 reason="validation_failed",
                 details={"issues": issue_dicts},
             )
-            return
+            self._last_safety_decision = None
+            result = CommandHandleResult(
+                command_id=command_id,
+                accepted=False,
+                success=False,
+                fault_code=first_fault,
+                message="validation_failed",
+                validation_issues=issue_dicts,
+                stage="rejected",
+                status=self.last_status_snapshot,
+            )
+            self._publish_validation(result)
+            return result
 
         self.events.publish(
             EVENT_TYPES["COMMAND_NORMALIZED"],
@@ -311,7 +445,19 @@ class ArkIsaacSimNode(Node):
 
         if validation.command.command_type == "system":
             self._handle_system_command(validation.command)
-            return
+            self._last_safety_decision = None
+            result = CommandHandleResult(
+                command_id=command_id,
+                accepted=True,
+                success=True,
+                message="system_executed",
+                validation_issues=issue_dicts,
+                normalized=validation.command,
+                stage="system_executed",
+                status=self.last_status_snapshot,
+            )
+            self._publish_validation(result)
+            return result
 
         safety_state = self._state_for_safety()
         safety_decision = self.safety_filter.apply(validation.command, safety_state)
@@ -322,6 +468,16 @@ class ArkIsaacSimNode(Node):
             list(safety_decision.reason_codes),
             dict(safety_decision.details),
         )
+        if self.ros2_publisher is not None:
+            try:
+                self.ros2_publisher.publish_safety(
+                    command_id,
+                    safety_decision.decision,
+                    list(safety_decision.reason_codes),
+                    dict(safety_decision.details),
+                )
+            except Exception:
+                pass
 
         if safety_decision.decision == "block" or safety_decision.command is None:
             fault = safety_decision.reason_codes[0] if safety_decision.reason_codes else "R3-E1401"
@@ -332,8 +488,24 @@ class ArkIsaacSimNode(Node):
                 reason="safety_block",
                 details=safety_decision.details,
             )
-            return
+            self._last_safety_decision = safety_decision
+            result = CommandHandleResult(
+                command_id=command_id,
+                accepted=False,
+                success=False,
+                fault_code=fault,
+                message="safety_block",
+                validation_issues=issue_dicts,
+                safety=safety_decision,
+                normalized=validation.command,
+                stage="safety_block",
+                status=self.last_status_snapshot,
+            )
+            self._publish_validation(result)
+            return result
 
+        stage = "accepted"
+        fault_code = ""
         if safety_decision.decision == "clamp":
             self.events.publish(
                 EVENT_TYPES["SAFETY_CLAMP"],
@@ -342,6 +514,8 @@ class ArkIsaacSimNode(Node):
                 reason="safety_clamp",
                 details=safety_decision.details,
             )
+            stage = "safety_clamp"
+            fault_code = "R3-E1402"
         else:
             self.events.publish(
                 EVENT_TYPES["SAFETY_PASS"],
@@ -351,24 +525,40 @@ class ArkIsaacSimNode(Node):
                 details={},
             )
 
-        self.active_command = safety_decision.command
+        self._last_safety_decision = safety_decision
+        with self._command_lock:
+            self.active_command = safety_decision.command
+        result = CommandHandleResult(
+            command_id=command_id,
+            accepted=True,
+            success=True,
+            fault_code=fault_code,
+            message="accepted",
+            validation_issues=issue_dicts,
+            safety=safety_decision,
+            normalized=safety_decision.command,
+            stage=stage,
+            status=self.last_status_snapshot,
+        )
+        self._publish_validation(result)
+        return result
 
     def step_node(self) -> None:
-        self._poll_adapters()
+        if self.compat_adapters:
+            self._drain_compat_adapters()
 
-        while self.pending_messages:
-            msg = self.pending_messages.pop(0)
-            self._process_message(msg)
+        with self._command_lock:
+            if self.active_command is None:
+                self.active_command = self._default_hold_command()
+            command_to_run = self.active_command
+            paused = self.paused
 
-        if self.active_command is None:
-            self.active_command = self._default_hold_command()
-
-        command_to_run = self.active_command
-        if self.paused:
+        if paused:
             command_to_run = self._default_hold_command()
 
         obs, execution_info = self.bridge.step(command_to_run)
-        self.last_observation = obs
+        with self._command_lock:
+            self.last_observation = obs
 
         command_id = command_to_run.command_id
         self.logger.log_ik(command_id, execution_info.get("ik", {}))
@@ -387,6 +577,7 @@ class ArkIsaacSimNode(Node):
         self.timeline.register_video_frame(f"frame-{step_idx}", timestamp_ms, {"render_step": step_idx})
 
         ik_info = execution_info.get("ik", {})
+        self._last_ik_info = dict(ik_info)
         if not ik_info.get("success", True):
             code = ik_info.get("reason_code", "R3-E1501")
             et = EVENT_TYPES["IK_FALLBACK"] if code == "R3-E1502" else EVENT_TYPES["IK_FAILURE"]
@@ -407,6 +598,7 @@ class ArkIsaacSimNode(Node):
             )
 
         gripper_info = execution_info.get("gripper", {})
+        self._last_gripper_info = dict(gripper_info)
         if gripper_info.get("stalled", False):
             self.events.publish(
                 EVENT_TYPES["GRIPPER_STALL"],
@@ -416,26 +608,58 @@ class ArkIsaacSimNode(Node):
                 details=gripper_info,
             )
 
-        now = time.time()
-        if self.status_output_enabled and now >= self._next_status_print_ts:
-            self._next_status_print_ts = now + self.status_output_interval_s
-            p = obs.ee_pose[:3]
-            arm_state = state_payload["current_arm_rad"]
-            status_snapshot = {
-                "timestamp_ms": timestamp_ms,
-                "step_idx": step_idx,
-                "command_id": command_id,
-                "ee_xyz": [float(p[0]), float(p[1]), float(p[2])],
-                "arm_rad": [float(v) for v in arm_state],
-                "gripper_rad": float(obs.gripper_position),
-            }
-            self._write_live_status(status_snapshot)
-            if self._status_to_console():
-                self._safe_print_status(
-                    f"[Isaac][step={step_idx:06d}] cmd={command_id} "
-                    f"EE xyz=({self._fmt(p[0], self.status_output_pose_precision)}, "
-                    f"{self._fmt(p[1], self.status_output_pose_precision)}, "
-                    f"{self._fmt(p[2], self.status_output_pose_precision)}) "
-                    f"| arm={self._format_arm(arm_state)} "
-                    f"| grip={self._fmt(obs.gripper_position, self.status_output_grip_precision)}"
+        p = obs.ee_pose[:3]
+        arm_state = state_payload["current_arm_rad"]
+        status_snapshot = {
+            "timestamp_ms": timestamp_ms,
+            "step_idx": step_idx,
+            "command_id": command_id,
+            "ee_xyz": [float(p[0]), float(p[1]), float(p[2])],
+            "arm_rad": [float(v) for v in arm_state],
+            "gripper_rad": float(obs.gripper_position),
+            "target_arm_rad": [float(v) for v in state_payload.get("target_arm_rad", [])],
+            "mode": getattr(command_to_run, "command_type", ""),
+        }
+        self.last_status_snapshot = status_snapshot
+
+        status_msg = None
+        safety_msg = None
+        if self.ros2_publisher is not None:
+            try:
+                status_msg = self.ros2_publisher.publish_status(
+                    command_id=command_id,
+                    timestamp_ms=timestamp_ms,
+                    step_idx=step_idx,
+                    state_payload=state_payload,
+                    ik_info=ik_info,
+                    gripper_info=gripper_info,
+                    stage="running",
                 )
+                if self._last_safety_decision is not None:
+                    safety_msg = self.ros2_publisher.make_safety_msg(
+                        self._last_safety_decision.decision,
+                        list(self._last_safety_decision.reason_codes),
+                        dict(self._last_safety_decision.details),
+                    )
+            except Exception:
+                pass
+        if self._action_feedback_cb is not None and status_msg is not None:
+            try:
+                self._action_feedback_cb(status_msg, safety_msg, "running")
+            except Exception:
+                pass
+
+        now = time.time()
+        if now >= self._next_status_print_ts:
+            self._next_status_print_ts = now + self.status_output_interval_s
+            if self.status_output_enabled:
+                self._write_live_status(status_snapshot)
+                if self._status_to_console():
+                    self._safe_print_status(
+                        f"[Isaac][step={step_idx:06d}] cmd={command_id} "
+                        f"EE xyz=({self._fmt(p[0], self.status_output_pose_precision)}, "
+                        f"{self._fmt(p[1], self.status_output_pose_precision)}, "
+                        f"{self._fmt(p[2], self.status_output_pose_precision)}) "
+                        f"| arm={self._format_arm(arm_state)} "
+                        f"| grip={self._fmt(obs.gripper_position, self.status_output_grip_precision)}"
+                    )

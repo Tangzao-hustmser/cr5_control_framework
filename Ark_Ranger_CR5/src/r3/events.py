@@ -18,6 +18,8 @@ EVENT_TYPES = {
     "GRIPPER_STALL": "gripper.stall",
     "CONTROL_APPLIED": "control.applied",
     "SYSTEM_STATE_CHANGE": "system.state_change",
+    "HEALTH_CHECK": "system.health_check",
+    "ASSET_CHECK": "system.asset_check",
     "STARTUP_REPORT": "startup.report",
 }
 

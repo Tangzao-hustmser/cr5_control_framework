@@ -1,47 +1,59 @@
-# run_registry.py
-import sys
+﻿# run_registry.py
 import os
+import sys
 import types
 
-# 1. 注入源码路径
+ENABLE_COMPAT = str(os.getenv("ARK_ENABLE_COMPAT", "")).strip().lower() in ("1", "true", "yes")
+
+if not ENABLE_COMPAT:
+    print("[Registry] Compatibility mode disabled. Set ARK_ENABLE_COMPAT=1 to run legacy registry.")
+    raise SystemExit(0)
+
+# 1. Inject legacy paths
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(current_dir, "ark_framework"))
 sys.path.insert(0, os.path.join(current_dir, "ark_types"))
 
-# 2. 核心：在加载框架前，先伪造 arktypes 依赖
-if 'arktypes' not in sys.modules:
-    mock_arktypes = types.ModuleType('arktypes')
-    sys.modules['arktypes'] = mock_arktypes
+# 2. Mock arktypes dependency before loading framework
+if "arktypes" not in sys.modules:
+    mock_arktypes = types.ModuleType("arktypes")
+    sys.modules["arktypes"] = mock_arktypes
 
 import arktypes
-# 批量伪造 Registry 启动所需的全部类型
-for name in ['flag_t', 'network_info_t', 'node_info_t']:
+
+# Provide minimal classes required by Registry
+for name in ["flag_t", "network_info_t", "node_info_t"]:
     if not hasattr(arktypes, name):
-        mock_cls = type(name, (object,), {
-            "encode": lambda self: b"",
-            "decode": staticmethod(lambda data: mock_cls())
-        })
+        mock_cls = type(
+            name,
+            (object,),
+            {
+                "encode": lambda self: b"",
+                "decode": staticmethod(lambda data: mock_cls()),
+            },
+        )
         setattr(arktypes, name, mock_cls)
 
-print("[Registry Patch] 依赖注入完成，正在启动...")
+print("[Registry Patch] Legacy dependencies injected. Starting registry...")
 
-# 3. 现在再导入真正的 Registry 逻辑
+# 3. Load and start registry
 try:
-    # 尝试导入并运行
     from ark.client.comm_infrastructure.registry import Registry
-    # 模拟命令行启动
+
     r = Registry()
-    print("--- Ark Registry 已成功启动 ---")
-    r.start() 
-    # 保持运行
+    print("--- Ark Registry started (compat mode) ---")
+    r.start()
+
     import time
+
     while True:
         time.sleep(1)
 except Exception as e:
-    print(f"[Fatal] 启动失败: {e}")
-    # 如果上面的 Registry 类没有 start 方法，尝试调用模块的 main (如果有)
+    print(f"[Fatal] Registry start failed: {e}")
     try:
         from ark.client.comm_infrastructure.registry import main
+
         main()
-    except:
+    except Exception:
         pass
+
