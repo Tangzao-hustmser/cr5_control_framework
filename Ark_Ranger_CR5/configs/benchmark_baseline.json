@@ -1,0 +1,8 @@
+﻿{
+  "mean_error": 0.05,
+  "max_error": 0.20,
+  "overshoot": 0.20,
+  "settling_time_s": 0.80,
+  "ik_failure_rate": 0.05,
+  "safety_intercept_rate": 0.10
+}

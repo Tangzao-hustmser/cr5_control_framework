@@ -1,0 +1,5 @@
+{"command_type":"pose","payload":{"frame":"world","position_m":[0.45,0.10,0.55],"orientation_wxyz":[1,0,0,0]}}
+{"command_type":"arm","payload":{"joint_positions_rad":[0.0,-0.4,0.8,0.0,0.3,0.0]}}
+{"command_type":"arm","payload":{"joint_positions_rad":[5.0,0.0,0.0,0.0,0.0,0.0]}}
+{"command_type":"gripper","payload":{"mode":"close"}}
+{"command_type":"system","payload":{"operation":"stop","reason":"e2e test done"}}

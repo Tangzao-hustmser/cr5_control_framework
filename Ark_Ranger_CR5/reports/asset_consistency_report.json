@@ -1,0 +1,28 @@
+{
+  "summary": {
+    "critical": 0,
+    "warning": 1,
+    "status": "DEGRADED"
+  },
+  "inputs": {
+    "project_root": "E:\\isaccsim\\isaac-sim-standalone-5.1.0-windows-x86_64\\Ark_Ranger_CR5",
+    "robot_config_path": "E:\\isaccsim\\isaac-sim-standalone-5.1.0-windows-x86_64\\Ark_Ranger_CR5\\configs\\robot_config.yaml",
+    "kinematics_config_path": "E:\\isaccsim\\isaac-sim-standalone-5.1.0-windows-x86_64\\Ark_Ranger_CR5\\configs\\kinematics_config.yaml",
+    "urdf_path": "E:\\isaccsim\\isaac-sim-standalone-5.1.0-windows-x86_64\\Ark_Ranger_CR5\\models/urdf/ranger_mini_cr5_with_gripper.urdf",
+    "usd_path": "E:\\isaccsim\\isaac-sim-standalone-5.1.0-windows-x86_64\\Ark_Ranger_CR5\\models/urdf/ranger_mini_cr5_with_gripper/ranger_mini_cr5_with_gripper.usd"
+  },
+  "issues": [
+    {
+      "level": "warning",
+      "code": "R3-E1801",
+      "message": "Large mesh scale detected ([1000.0, 1000.0, 1000.0]) for mesh ../meshes/ranger_mini/ranger_base.dae; verify units consistency."
+    }
+  ],
+  "facts": {
+    "arm_joint_count": 6,
+    "gripper_joint_count": 1,
+    "urdf_joint_limit_count": 18,
+    "urdf_link_count": 37,
+    "ee_link": "Link6"
+  }
+}

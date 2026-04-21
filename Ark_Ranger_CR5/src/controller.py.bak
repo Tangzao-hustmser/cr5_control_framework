@@ -1,0 +1,105 @@
+# src/controller.py
+import numpy as np
+import yaml
+from pathlib import Path
+
+# 兼容 5.1.0 路径
+try:
+    from isaacsim.core.prims import SingleArticulation as Articulation
+    from isaacsim.core.utils.rotations import quat_to_euler_angles
+    from isaacsim.core.utils.types import ArticulationAction
+    from isaacsim.core.utils.stage import add_reference_to_stage
+except ImportError:
+    from omni.isaac.core.articulations import Articulation
+    from omni.isaac.core.utils.rotations import quat_to_euler_angles
+    from omni.isaac.core.utils.types import ArticulationAction
+    from omni.isaac.core.utils.stage import add_reference_to_stage
+
+class ArkIsaacController:
+    def __init__(self, config_path, world):
+        with open(config_path, 'r', encoding='utf-8-sig') as f:
+            self.cfg = yaml.safe_load(f)
+        
+        self.world = world
+        self.robot_name = self.cfg['robot']['name']
+        self.prim_path = self.cfg['robot']['prim_path']
+        
+        # --- 动作平滑变量 ---
+        self.current_target_pos = None
+        self.smoothing_factor = 0.05  # 平滑系数，防止“打招呼”时剧烈摇晃
+
+        init_cfg = self.cfg['robot'].get('initial_state', {})
+        self.init_pos = np.array(init_cfg.get('position', [0.0, 0.0, 0.0]))
+        self.init_ori = np.array(init_cfg.get('orientation', [1.0, 0.0, 0.0, 0.0]))
+
+        self.robot = self.world.scene.get_object(self.robot_name)
+        if self.robot is None:
+            usd_path = self.cfg.get('robot', {}).get('usd_path')
+            if usd_path:
+                usd_full_path = Path(__file__).parent.parent / usd_path
+                add_reference_to_stage(str(usd_full_path), self.prim_path)
+            
+            self.robot = self.world.scene.add(
+                Articulation(
+                    self.prim_path, 
+                    name=self.robot_name,
+                    position=self.init_pos,
+                    orientation=self.init_ori
+                )
+            )
+        else:
+            self.robot.set_world_pose(position=self.init_pos, orientation=self.init_ori)
+        
+        self.arm_joints = self.cfg['action_space']['arm']['joints']
+        self.arm_indices = []
+
+    def initialize_physics(self):
+        """物理准备就绪后的回调"""
+        self.robot.initialize()
+        self.robot.set_world_pose(position=self.init_pos, orientation=self.init_ori)
+        
+        for j in self.arm_joints:
+            idx = self.robot.get_dof_index(j)
+            if idx is not None:
+                self.arm_indices.append(int(idx))
+        
+        self.art_controller = self.robot.get_articulation_controller()
+
+        # --- 新增：设置物理增益 (KP/KD)，防止机器人瘫软或乱动 ---
+        # 针对 CR5 机械臂优化的参数
+        kps = [4e5] * self.robot.num_dof 
+        kds = [4e4] * self.robot.num_dof
+        self.art_controller.set_gains(kps=kps, kds=kds)
+        
+        # 限制最大力矩，增加安全性
+        for i in range(self.robot.num_dof):
+            self.robot.dof_properties["maxEffort"][i] = 400.0
+            
+        print(f"[Controller] 初始位置已设置为: {self.init_pos}, 物理增益已配置")
+
+    def apply_action(self, action_dict):
+        if self.art_controller is None or not self.arm_indices:
+            return
+        if 'arm' in action_dict:
+            target_pos = np.array(action_dict['arm'], dtype=np.float32)
+
+            # --- 新增：平滑插值逻辑 ---
+            # 第一次执行时，以当前关节位置为起点
+            if self.current_target_pos is None:
+                self.current_target_pos = self.robot.get_joint_positions(joint_indices=self.arm_indices)
+            
+            # 指数平滑：让关节平稳过渡到目标位置，避免剧烈摇摆
+            self.current_target_pos = self.current_target_pos + self.smoothing_factor * (target_pos - self.current_target_pos)
+            
+            action = ArticulationAction(joint_positions=self.current_target_pos, joint_indices=self.arm_indices)
+            self.art_controller.apply_action(action)
+
+    def get_observation(self):
+        if not self.arm_indices: return {"odom": {"x":0,"y":0,"theta":0}, "arm_pos": []}
+        pos, quat = self.robot.get_world_pose()
+        euler = quat_to_euler_angles(quat)
+        current_joint_pos = self.robot.get_joint_positions(joint_indices=self.arm_indices)
+        return {
+            "odom": {"x": float(pos[0]), "y": float(pos[1]), "theta": float(euler[2])},
+            "arm_pos": current_joint_pos.tolist()
+        }

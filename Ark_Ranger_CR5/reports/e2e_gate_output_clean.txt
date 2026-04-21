@@ -1,0 +1,24 @@
+Asset consistency status: DEGRADED
+Critical: 0  Warning: 1
+Report: E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\Ark_Ranger_CR5\reports\asset_consistency_report.json
+test_asset_check_runs_and_writes_report (test_asset_checker.TestAssetChecker.test_asset_check_runs_and_writes_report) ... ok
+test_retry_then_fallback (test_ik_policy.TestIKPolicy.test_retry_then_fallback) ... ok
+test_success_resets_retry_counter (test_ik_policy.TestIKPolicy.test_success_resets_retry_counter) ... ok
+test_arm_dimension_mismatch (test_protocol_validator.TestProtocolValidator.test_arm_dimension_mismatch) ... ok
+test_pose_command_valid (test_protocol_validator.TestProtocolValidator.test_pose_command_valid) ... ok
+test_reject_legacy_message (test_protocol_validator.TestProtocolValidator.test_reject_legacy_message) ... ok
+test_same_payload_same_internal_shape (test_protocol_validator.TestProtocolValidator.test_same_payload_same_internal_shape) ... ok
+test_unknown_field_rejected (test_protocol_validator.TestProtocolValidator.test_unknown_field_rejected) ... ok
+test_load_scenarios (test_replay_benchmark.TestReplayAndBenchmark.test_load_scenarios) ... ok
+test_replay_and_metrics (test_replay_benchmark.TestReplayAndBenchmark.test_replay_and_metrics) ... ok
+test_block_arm_far_outside (test_safety_filter.TestSafetyFilter.test_block_arm_far_outside) ... ok
+test_clamp_arm (test_safety_filter.TestSafetyFilter.test_clamp_arm) ... ok
+test_pass_arm (test_safety_filter.TestSafetyFilter.test_pass_arm) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.027s
+
+OK
+[Gate] Run: E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\kit\python\kit.exe scripts/run_asset_check.py
+[Gate] Run: E:\isaccsim\isaac-sim-standalone-5.1.0-windows-x86_64\kit\python\kit.exe -m unittest discover -s tests -p test_*.py -v
+[Gate] PASS

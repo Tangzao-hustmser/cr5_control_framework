@@ -1,0 +1,21 @@
+# configs/kinematics_config.yaml
+cspace:
+  - joint1
+  - joint2
+  - joint3
+  - joint4
+  - joint5
+  - joint6
+
+root_link: arm_base
+ee_link: Link6
+
+joint_limits:
+  - [-3.14159, 3.14159]
+  - [-3.14159, 3.14159]
+  - [-2.86234, 2.86234]
+  - [-3.14159, 3.14159]
+  - [-3.14159, 3.14159]
+  - [-3.14159, 3.14159]
+
+default_q: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]

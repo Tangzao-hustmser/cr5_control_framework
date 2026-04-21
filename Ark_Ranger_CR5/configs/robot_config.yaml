@@ -1,0 +1,41 @@
+﻿# Ark Ranger CR5 robot metadata
+robot:
+  name: "cr5_robot"
+  prim_path: "/World/ranger_mini_cr5"
+  usd_path: "models/urdf/ranger_mini_cr5_with_gripper/ranger_mini_cr5_with_gripper.usd"
+  urdf_path: "models/urdf/ranger_mini_cr5_with_gripper.urdf"
+  initial_state:
+    position: [0.0, 0.0, 0.4]
+    orientation: [1.0, 0.0, 0.0, 0.0]
+
+coordinate_frames:
+  allowed: ["world"]
+  default: "world"
+
+# Action space definition and hard limits
+action_space:
+  pose:
+    workspace_m:
+      x: [-1.2, 1.2]
+      y: [-1.2, 1.2]
+      z: [0.05, 1.6]
+
+  arm:
+    joints: ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
+    default_limit: [-3.14, 3.14]
+    joint_limits:
+      joint1: [-3.14, 3.14]
+      joint2: [-3.14, 3.14]
+      joint3: [-2.86, 2.86]
+      joint4: [-3.14, 3.14]
+      joint5: [-3.14, 3.14]
+      joint6: [-6.28, 6.28]
+
+  gripper:
+    joints: ["finger_joint"]
+    joint_limits:
+      finger_joint: [0.0, 0.6524]
+
+topics:
+  action: "/robot/action"
+  observation: "/robot/observation"

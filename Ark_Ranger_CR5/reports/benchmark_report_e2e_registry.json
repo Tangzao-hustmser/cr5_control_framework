@@ -1,0 +1,151 @@
+{
+  "baseline": {
+    "mean_error": 0.05,
+    "max_error": 0.2,
+    "overshoot": 0.2,
+    "settling_time_s": 0.8,
+    "ik_failure_rate": 0.05,
+    "safety_intercept_rate": 0.1
+  },
+  "current": {
+    "mean_error": 0.0,
+    "max_error": 0.0,
+    "overshoot": 0.0,
+    "settling_time_s": 0.0,
+    "ik_failure_rate": 0.0,
+    "safety_intercept_rate": 0.0
+  },
+  "delta": {
+    "mean_error": -0.05,
+    "max_error": -0.2,
+    "overshoot": -0.2,
+    "settling_time_s": -0.8,
+    "ik_failure_rate": -0.05,
+    "safety_intercept_rate": -0.1
+  },
+  "scenarios": [
+    {
+      "id": "point_to_point",
+      "description": "End-effector point reaching with nominal target.",
+      "command_sequence": [
+        {
+          "command_type": "pose",
+          "payload": {
+            "frame": "world",
+            "position_m": [
+              0.45,
+              0.1,
+              0.55
+            ],
+            "orientation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "trajectory_tracking",
+      "description": "Multi-waypoint trajectory for smooth tracking.",
+      "command_sequence": [
+        {
+          "command_type": "pose",
+          "payload": {
+            "frame": "world",
+            "position_m": [
+              0.4,
+              0.0,
+              0.45
+            ],
+            "orientation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "command_type": "pose",
+          "payload": {
+            "frame": "world",
+            "position_m": [
+              0.5,
+              0.15,
+              0.5
+            ],
+            "orientation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        },
+        {
+          "command_type": "pose",
+          "payload": {
+            "frame": "world",
+            "position_m": [
+              0.42,
+              -0.1,
+              0.52
+            ],
+            "orientation_wxyz": [
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "gripper_cycle",
+      "description": "Gripper open-close-hold sequence.",
+      "command_sequence": [
+        {
+          "command_type": "gripper",
+          "payload": {
+            "mode": "open"
+          }
+        },
+        {
+          "command_type": "gripper",
+          "payload": {
+            "mode": "close"
+          }
+        },
+        {
+          "command_type": "gripper",
+          "payload": {
+            "mode": "hold"
+          }
+        }
+      ]
+    },
+    {
+      "id": "abnormal_input",
+      "description": "Out-of-range joint command to verify safety interception.",
+      "command_sequence": [
+        {
+          "command_type": "arm",
+          "payload": {
+            "joint_positions_rad": [
+              5.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

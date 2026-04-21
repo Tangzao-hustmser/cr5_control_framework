@@ -1,0 +1,39 @@
+﻿runtime:
+  protocol_version: "r3.v1"
+  input_source: "local_terminal"
+
+  adapters:
+    local_terminal:
+      prompt: "r3-json> "
+      help_on_start: true
+    ros2:
+      topic: "/robot/action"
+      node_name: "ark_ranger_r3_adapter"
+
+  health:
+    require_lcm: false
+    require_arktypes: false
+
+  safety:
+    max_pose_deviation_m: 0.40
+    max_joint_deviation_rad: 1.20
+
+  logging:
+    root_dir: "reports/logs"
+
+  status_output:
+    enabled: true
+    destination: "auto"
+    interval_s: 1.0
+    pose_precision: 3
+    arm_precision: 4
+    grip_precision: 4
+    live_status_file: "reports/live_status/current_status.json"
+
+  ik:
+    max_retries: 3
+
+  gripper:
+    stall_error_threshold: 0.03
+    movement_threshold: 0.0001
+    stall_steps: 45
